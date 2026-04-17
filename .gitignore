@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.idea/
+.vscode/
+
+state.json
+report.csv
+
+assets/species_templates/*.png
+assets/species_templates/*.jpg
+assets/species_templates/*.jpeg
+assets/species_templates/*.bmp
+assets/species_templates/*.webp
