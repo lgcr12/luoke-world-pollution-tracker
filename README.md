@@ -12,10 +12,10 @@
 ## 界面预览
 
 ### 运行中的悬浮界面
-![运行中的悬浮界面](./assets/screenshots/ui-overlay.svg)
+![运行中的悬浮界面](./assets/screenshots/ui-overlay.jpg)
 
 ### 主窗口界面
-![主窗口界面](./assets/screenshots/ui-window.svg)
+![主窗口界面](./assets/screenshots/ui-window.jpg)
 
 ## 功能说明
 
