@@ -490,12 +490,12 @@ class QtTrackerWindow(QMainWindow):
             self.bridge.log.emit(f'实时识别模式：模板库匹配，共加载 {len(self.species_templates)} 个模板')
             interval = max(float(screen_cfg.get('capture_interval_sec', 0.35)), 0.45)
             min_gap = float(screen_cfg.get('min_trigger_gap_sec', 1.2))
-            rearm_absent_sec = float(screen_cfg.get('rearm_absent_sec', 4.0))
+            rearm_absent_sec = float(screen_cfg.get('rearm_absent_sec', 3.0))
             icon_value = int(icon_cfg.get('icon_pollution_value', 1))
             window_hint = str(screen_cfg.get('window_title_contains', '') or '')
             last_trigger_ts = 0.0
             last_info_ts = 0.0
-            last_counted_pet = ''
+            battle_locked = False
             absent_since_ts = None
             with tracker.mss.mss() as sct:
                 warned = False
@@ -515,10 +515,10 @@ class QtTrackerWindow(QMainWindow):
                     now = time.time()
                     if match and (now - last_trigger_ts >= min_gap):
                         absent_since_ts = None
-                        pet_name = match['name']
-                        if pet_name != last_counted_pet:
+                        if not battle_locked:
+                            pet_name = match['name']
                             last_trigger_ts = now
-                            last_counted_pet = pet_name
+                            battle_locked = True
                             self.state['total_pollution'] = int(self.state.get('total_pollution', 0)) + icon_value
                             pool = self.state.setdefault('pet_pool', {})
                             item = pool.setdefault(pet_name, {'count': 0, 'pollution': 0})
@@ -531,8 +531,8 @@ class QtTrackerWindow(QMainWindow):
                     elif not match:
                         if absent_since_ts is None:
                             absent_since_ts = now
-                        elif last_counted_pet and now - absent_since_ts >= rearm_absent_sec:
-                            last_counted_pet = ''
+                        elif battle_locked and now - absent_since_ts >= rearm_absent_sec:
+                            battle_locked = False
                     if now - last_info_ts >= 2.0:
                         self.bridge.log.emit(f"实时状态 hit=True pet={match['name']} score={match['score']:.3f}" if match else '实时状态 hit=False')
                         last_info_ts = now

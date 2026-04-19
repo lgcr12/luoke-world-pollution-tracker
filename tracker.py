@@ -127,6 +127,7 @@ def default_config() -> Dict:
             "present_confirm_frames": 2,
             "absent_confirm_frames": 2,
             "min_trigger_gap_sec": 1.2,
+            "rearm_absent_sec": 3.0,
         },
         "name_mode": {
             "species_db_path": str(ROOT / "species_names.json"),
