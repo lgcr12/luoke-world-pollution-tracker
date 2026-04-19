@@ -4,12 +4,14 @@ import subprocess
 import sys
 import threading
 import time
+import ctypes
+from ctypes import wintypes
 from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QRadialGradient
+from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, Signal, QAbstractNativeEventFilter, QEvent
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QRadialGradient, QAction
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -21,9 +23,12 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QRubberBand,
+    QStyle,
+    QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -117,6 +122,26 @@ class CaptureOverlay(QWidget):
             self.cancelled.emit()
             self.close()
 
+class WinHotkeyFilter(QAbstractNativeEventFilter):
+    WM_HOTKEY = 0x0312
+
+    def __init__(self, callback):
+        super().__init__()
+        self.callback = callback
+
+    def nativeEventFilter(self, event_type, message):
+        if sys.platform != 'win32':
+            return False, 0
+        if event_type not in ('windows_generic_MSG', 'windows_dispatcher_MSG'):
+            return False, 0
+        try:
+            msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
+        except Exception:
+            return False, 0
+        if msg.message == self.WM_HOTKEY and int(msg.wParam) == 1:
+            self.callback()
+            return True, 0
+        return False, 0
 
 class QtTrackerWindow(QMainWindow):
     def __init__(self):
@@ -132,6 +157,11 @@ class QtTrackerWindow(QMainWindow):
         self.drag_pos = None
         self.logs = []
         self.overlay = None
+        self.tray = None
+        self.tray_menu = None
+        self.hotkey_filter = None
+        self.hotkey_registered = False
+        self._quitting = False
         self.bridge = Bridge()
         self.bridge.log.connect(self._append_log)
         self.bridge.status.connect(self._set_status)
@@ -152,6 +182,8 @@ class QtTrackerWindow(QMainWindow):
         self.clock.timeout.connect(self._tick_clock)
         self.clock.start(1000)
         self._tick_clock()
+        self._setup_tray()
+        self._setup_global_hotkey()
 
     def _build_ui(self):
         root = QWidget()
@@ -377,6 +409,93 @@ class QtTrackerWindow(QMainWindow):
         self.time_label.setText(time.strftime('%H:%M', now))
         self.date_label.setText(time.strftime('%d %B', now))
 
+    def _setup_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self.tray = QSystemTrayIcon(self)
+        self.tray.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
+        self.tray.setToolTip('洛克污染统计器')
+
+        self.tray_menu = QMenu()
+        act_toggle = QAction('显示/隐藏', self)
+        act_toggle.triggered.connect(self._toggle_visible)
+        act_start = QAction('开始实时识别', self)
+        act_start.triggered.connect(self.start_realtime)
+        act_stop = QAction('停止识别', self)
+        act_stop.triggered.connect(self.stop_watch)
+        act_capture = QAction('模板截图 (Ctrl+Alt+T)', self)
+        act_capture.triggered.connect(self.capture_species_template)
+        act_quit = QAction('退出', self)
+        act_quit.triggered.connect(self._quit_from_tray)
+
+        self.tray_menu.addAction(act_toggle)
+        self.tray_menu.addAction(act_start)
+        self.tray_menu.addAction(act_stop)
+        self.tray_menu.addAction(act_capture)
+        self.tray_menu.addSeparator()
+        self.tray_menu.addAction(act_quit)
+        self.tray.setContextMenu(self.tray_menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._toggle_visible()
+
+    def _toggle_visible(self):
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
+    def _setup_global_hotkey(self):
+        if sys.platform != 'win32':
+            return
+        try:
+            self.hotkey_filter = WinHotkeyFilter(self._on_capture_hotkey)
+            QApplication.instance().installNativeEventFilter(self.hotkey_filter)
+            user32 = ctypes.windll.user32
+            mod = 0x0001 | 0x0002
+            vk_t = 0x54
+            self.hotkey_registered = bool(user32.RegisterHotKey(None, 1, mod, vk_t))
+            if self.hotkey_registered:
+                self.bridge.log.emit('全局热键已启用: Ctrl+Alt+T')
+            else:
+                self.bridge.log.emit('全局热键注册失败')
+        except Exception as exc:
+            self.bridge.log.emit(f'全局热键异常: {exc}')
+
+    def _on_capture_hotkey(self):
+        if self.overlay is not None:
+            return
+        QTimer.singleShot(0, self.capture_species_template)
+
+    def _unregister_hotkey(self):
+        if sys.platform == 'win32' and self.hotkey_registered:
+            try:
+                ctypes.windll.user32.UnregisterHotKey(None, 1)
+            except Exception:
+                pass
+            self.hotkey_registered = False
+        if self.hotkey_filter is not None:
+            try:
+                QApplication.instance().removeNativeEventFilter(self.hotkey_filter)
+            except Exception:
+                pass
+            self.hotkey_filter = None
+
+    def _quit_from_tray(self):
+        self._quitting = True
+        self.stop_event.set()
+        self.close()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange and self.isMinimized() and self.tray is not None:
+            QTimer.singleShot(0, self.hide)
+            self.tray.showMessage('洛克污染统计器', '已最小化到托盘', QSystemTrayIcon.MessageIcon.Information, 1200)
     def _append_log(self, text):
         line = f"[{time.strftime('%H:%M:%S')}] {text}"
         self.logs.append(line)
@@ -428,11 +547,24 @@ class QtTrackerWindow(QMainWindow):
         self.drag_pos = None
 
     def closeEvent(self, event):
+        if self.tray is not None and self.tray.isVisible() and not self._quitting:
+            event.ignore()
+            self.hide()
+            self.tray.showMessage('洛克污染统计器', '程序仍在后台运行', QSystemTrayIcon.MessageIcon.Information, 1200)
+            return
         self.stop_event.set()
+        self._unregister_hotkey()
+        if self.tray is not None:
+            self.tray.hide()
         if self.overlay is not None:
             self.overlay.close()
             self.overlay.deleteLater()
             self.overlay = None
+        self.tray = None
+        self.tray_menu = None
+        self.hotkey_filter = None
+        self.hotkey_registered = False
+        self._quitting = False
         tracker.save_json(tracker.STATE_PATH, self.state)
         super().closeEvent(event)
 
@@ -630,6 +762,11 @@ class QtTrackerWindow(QMainWindow):
         if self.overlay is not None:
             self.overlay.deleteLater()
             self.overlay = None
+        self.tray = None
+        self.tray_menu = None
+        self.hotkey_filter = None
+        self.hotkey_registered = False
+        self._quitting = False
         self.show()
         self.raise_()
         self.activateWindow()
@@ -639,6 +776,11 @@ class QtTrackerWindow(QMainWindow):
         if self.overlay is not None:
             self.overlay.deleteLater()
             self.overlay = None
+        self.tray = None
+        self.tray_menu = None
+        self.hotkey_filter = None
+        self.hotkey_registered = False
+        self._quitting = False
         self.show()
         self.raise_()
         self.activateWindow()
@@ -675,3 +817,9 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+
+
+
+
