@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.packenv/
+.pyi_build/
+release/
 
 .idea/
 .vscode/
