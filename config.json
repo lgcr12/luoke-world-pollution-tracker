@@ -1,6 +1,6 @@
 {
   "watch_dir": "E:/code/screenshots",
-  "poll_interval_sec": 2.0,
+  "poll_interval_sec": 2,
   "image_exts": [
     ".png",
     ".jpg",
@@ -13,8 +13,29 @@
     "use_template": true,
     "template_path": "E:\\code\\luoke_pollution_tracker\\assets\\pollution_icon.png",
     "icon_pollution_value": 1,
-    "template_match_threshold": 0.76,
-    "purple_ratio_threshold": 0.26,
+    "template_match_threshold": 0.7,
+    "purple_ratio_threshold": 0.2,
+    "enable_lowlight_boost": true,
+    "lowlight_v_gain": 1.18,
+    "lowlight_clahe_clip": 2.2,
+    "template_scales": [
+      0.88,
+      0.94,
+      1.0,
+      1.06,
+      1.12
+    ],
+    "enable_dark_scene_adaptive_threshold": true,
+    "dark_scene_v_threshold": 92.0,
+    "dark_scene_score_relax_max": 0.12,
+    "dark_scene_purple_relax_max": 0.08,
+    "dark_scene_score_floor": 0.6,
+    "dark_scene_purple_floor": 0.12,
+    "enable_mask_iou_gate": true,
+    "mask_iou_threshold": 0.16,
+    "mask_iou_dark_relax_max": 0.08,
+    "mask_iou_dark_floor": 0.08,
+    "mask_iou_bypass_score_margin": 0.08,
     "purple_blob_min_area": 220,
     "purple_blob_max_area": 18000,
     "purple_blob_min_fill": 0.22,
@@ -29,7 +50,12 @@
         255,
         255
       ]
-    ]
+    ],
+    "dark_fallback_score_margin": 0.08,
+    "dark_fallback_purple_min": 0.18,
+    "template_topk_per_scale": 6,
+    "template_max_candidates": 24,
+    "template_candidate_iou_nms": 0.68
   },
   "ocr_mode": {
     "enabled": false,
@@ -58,8 +84,8 @@
   },
   "screen_mode": {
     "enabled": true,
-    "capture_interval_sec": 0.5,
-    "window_title_contains": "洛克王国",
+    "capture_interval_sec": 0.75,
+    "window_title_contains": "????",
     "monitor_index": 1,
     "present_confirm_frames": 2,
     "absent_confirm_frames": 2,
@@ -70,14 +96,64 @@
       "y_ratio": 0.0,
       "w_ratio": 0.38,
       "h_ratio": 0.22
+    },
+    "search_region_fallback": {
+      "x_ratio": 0.5,
+      "y_ratio": 0.0,
+      "w_ratio": 0.5,
+      "h_ratio": 0.3
     }
   },
   "name_mode": {
+    "enabled": true,
     "species_db_path": "E:\\code\\luoke_pollution_tracker\\species_names.json",
-    "fuzzy_threshold": 0.62
+    "fuzzy_threshold": 0.62,
+    "require_name_match": true,
+    "prefer_ocr_name_first": true,
+    "min_ocr_text_length": 2,
+    "ocr_interval_sec": 0.9,
+    "cache_ttl_sec": 2.4,
+    "region": {
+      "x_ratio": 0.79,
+      "y_ratio": 0.015,
+      "w_ratio": 0.16,
+      "h_ratio": 0.085
+    }
   },
   "species_template_mode": {
     "enabled": true,
-    "template_dir": "E:\\code\\luoke_pollution_tracker\\assets\\species_templates"
+    "template_dir": "E:\\code\\luoke_pollution_tracker\\assets\\species_templates",
+    "match_threshold": 0.52,
+    "purple_ratio_threshold": 0.14,
+    "enable_mask_iou_gate": false,
+    "debug_best_min_score": 0.48,
+    "second_best_margin": 0.06,
+    "local_track_enabled": true,
+    "local_track_expand_ratio": 1.8,
+    "full_scan_interval_sec": 1.4
+  },
+  "attribute_mode": {
+    "enabled": false,
+    "template_dir": "E:\\code\\luoke_pollution_tracker\\assets\\attribute_templates",
+    "species_attribute_map_path": "E:\\code\\luoke_pollution_tracker\\species_attributes.json",
+    "min_match_score": 0.62,
+    "require_species_map": false,
+    "require_attribute_template": false,
+    "scales": [
+      0.9,
+      1.0,
+      1.1
+    ],
+    "roi": {
+      "x_ratio": -0.52,
+      "y_ratio": 0.5,
+      "w_ratio": 0.54,
+      "h_ratio": 0.54
+    }
+  },
+  "floating_orb": {
+    "x": -20,
+    "y": 476,
+    "dock_side": "left"
   }
 }

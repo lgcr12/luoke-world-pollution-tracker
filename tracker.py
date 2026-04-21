@@ -6,6 +6,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -28,13 +29,18 @@ except Exception:
     gw = None
 
 
-ROOT = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    ROOT = Path(sys.executable).resolve().parent
+else:
+    ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 STATE_PATH = ROOT / "state.json"
 REPORT_PATH = ROOT / "report.csv"
 ASSETS_DIR = ROOT / "assets"
 ICON_TEMPLATE = ASSETS_DIR / "pollution_icon.png"
 SPECIES_TEMPLATE_DIR = ASSETS_DIR / "species_templates"
+ATTRIBUTE_TEMPLATE_DIR = ASSETS_DIR / "attribute_templates"
+SPECIES_ATTRIBUTE_PATH = ROOT / "species_attributes.json"
 
 
 @dataclass
@@ -92,8 +98,23 @@ def default_config() -> Dict:
             "use_template": True,
             "template_path": str(ICON_TEMPLATE),
             "icon_pollution_value": 1,
-            "template_match_threshold": 0.55,
-            "purple_ratio_threshold": 0.12,
+            "template_match_threshold": 0.72,
+            "purple_ratio_threshold": 0.22,
+            "enable_lowlight_boost": True,
+            "lowlight_v_gain": 1.18,
+            "lowlight_clahe_clip": 2.2,
+            "template_scales": [0.88, 0.94, 1.0, 1.06, 1.12],
+            "enable_dark_scene_adaptive_threshold": True,
+            "dark_scene_v_threshold": 92.0,
+            "dark_scene_score_relax_max": 0.12,
+            "dark_scene_purple_relax_max": 0.08,
+            "dark_scene_score_floor": 0.62,
+            "dark_scene_purple_floor": 0.14,
+            "enable_mask_iou_gate": True,
+            "mask_iou_threshold": 0.16,
+            "mask_iou_dark_relax_max": 0.08,
+            "mask_iou_dark_floor": 0.08,
+            "mask_iou_bypass_score_margin": 0.08,
             "purple_blob_min_area": 220,
             "purple_blob_max_area": 18000,
             "purple_blob_min_fill": 0.22,
@@ -121,7 +142,7 @@ def default_config() -> Dict:
         },
         "screen_mode": {
             "enabled": True,
-            "capture_interval_sec": 0.35,
+            "capture_interval_sec": 0.7,
             "window_title_contains": "洛克王国",
             "monitor_index": 1,
             "present_confirm_frames": 2,
@@ -130,12 +151,47 @@ def default_config() -> Dict:
             "rearm_absent_sec": 3.0,
         },
         "name_mode": {
+            "enabled": True,
             "species_db_path": str(ROOT / "species_names.json"),
-            "fuzzy_threshold": 0.62
+            "fuzzy_threshold": 0.62,
+            "require_name_match": True,
+            "prefer_ocr_name_first": True,
+            "min_ocr_text_length": 2,
+            "ocr_interval_sec": 0.9,
+            "cache_ttl_sec": 2.4,
+            "region": {
+                "x_ratio": 0.79,
+                "y_ratio": 0.015,
+                "w_ratio": 0.16,
+                "h_ratio": 0.085,
+            },
         },
         "species_template_mode": {
             "enabled": True,
             "template_dir": str(SPECIES_TEMPLATE_DIR),
+            "match_threshold": 0.58,
+            "purple_ratio_threshold": 0.18,
+            "enable_mask_iou_gate": False,
+            "debug_best_min_score": 0.58,
+            "second_best_margin": 0.06,
+            "local_track_enabled": True,
+            "local_track_expand_ratio": 1.8,
+            "full_scan_interval_sec": 1.2,
+        },
+        "attribute_mode": {
+            "enabled": True,
+            "template_dir": str(ATTRIBUTE_TEMPLATE_DIR),
+            "species_attribute_map_path": str(SPECIES_ATTRIBUTE_PATH),
+            "min_match_score": 0.62,
+            "require_species_map": True,
+            "require_attribute_template": True,
+            "scales": [0.9, 1.0, 1.1],
+            "roi": {
+                "x_ratio": -0.42,
+                "y_ratio": 0.52,
+                "w_ratio": 0.62,
+                "h_ratio": 0.56,
+            },
         },
     }
 
@@ -155,6 +211,7 @@ def merge_defaults(cfg: Dict, defaults: Dict) -> Dict:
 def init_files():
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     SPECIES_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+    ATTRIBUTE_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
 
     cfg = load_json(CONFIG_PATH, None)
     if cfg is None:
@@ -192,6 +249,20 @@ def init_files():
             "把每种精灵第一次遇到时的污染头像截图放到这里。\n"
             "文件名就是精灵名，例如：机械方方.png、筛晨.png\n"
             "建议只截左侧污染头像区域，尽量不要带整条血条和界面其它文字。\n",
+            encoding="utf-8",
+        )
+
+    attr_readme = ATTRIBUTE_TEMPLATE_DIR / "README.txt"
+    if not attr_readme.exists():
+        attr_readme.write_text(
+            "将属性小图标单独截图放在这里，文件名就是属性名，例如：冰.png、水.png、火.png。\n"
+            "建议截图尺寸 24~48 像素，背景尽量干净。\n",
+            encoding="utf-8",
+        )
+
+    if not SPECIES_ATTRIBUTE_PATH.exists():
+        SPECIES_ATTRIBUTE_PATH.write_text(
+            json.dumps({}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
@@ -241,6 +312,18 @@ def run_ocr_on_bgr(engine, frame_bgr: np.ndarray) -> str:
         except Exception:
             continue
     return "\n".join(lines)
+
+
+def normalize_species_name_text(text: str) -> str:
+    if not text:
+        return ""
+    return "".join(ch for ch in str(text) if ("\u4e00" <= ch <= "\u9fff") or ch.isalnum())
+
+
+def similarity_ratio(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    return float(SequenceMatcher(None, a, b).ratio())
 
 
 def extract_pollution_from_text(ocr_text: str, ocr_cfg: Dict) -> Tuple[int, str]:
@@ -293,6 +376,271 @@ def _purple_mask_from_hsv(hsv_img: np.ndarray, hsv_ranges: List[List[int]]) -> O
         mask = cv2.inRange(hsv_img, low, high)
         merged_mask = mask if merged_mask is None else cv2.bitwise_or(merged_mask, mask)
     return merged_mask
+
+
+def _boost_lowlight_bgr(bgr_img: np.ndarray, icon_cfg: Dict) -> np.ndarray:
+    if bgr_img is None or bgr_img.size == 0 or not bool(icon_cfg.get("enable_lowlight_boost", True)):
+        return bgr_img
+    hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    clip = float(icon_cfg.get("lowlight_clahe_clip", 2.2))
+    gain = float(icon_cfg.get("lowlight_v_gain", 1.18))
+    clahe = cv2.createCLAHE(clipLimit=max(1.0, clip), tileGridSize=(8, 8))
+    v = clahe.apply(v)
+    if abs(gain - 1.0) > 1e-3:
+        v = np.clip(v.astype(np.float32) * gain, 0, 255).astype(np.uint8)
+    boosted = cv2.merge((h, s, v))
+    return cv2.cvtColor(boosted, cv2.COLOR_HSV2BGR)
+
+
+def _adaptive_thresholds(frame_bgr: np.ndarray, icon_cfg: Dict) -> Tuple[float, float, float]:
+    score_th = float(icon_cfg.get("template_match_threshold", 0.55))
+    purple_th = float(icon_cfg.get("purple_ratio_threshold", 0.12))
+    if frame_bgr is None or frame_bgr.size == 0:
+        return score_th, purple_th, 255.0
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    mean_v = float(np.mean(hsv[:, :, 2]))
+    if not bool(icon_cfg.get("enable_dark_scene_adaptive_threshold", True)):
+        return score_th, purple_th, mean_v
+    dark_v = float(icon_cfg.get("dark_scene_v_threshold", 92.0))
+    if mean_v >= dark_v:
+        return score_th, purple_th, mean_v
+
+    darkness = max(0.0, min(1.0, (dark_v - mean_v) / max(dark_v, 1.0)))
+    score_relax_max = float(icon_cfg.get("dark_scene_score_relax_max", 0.12))
+    purple_relax_max = float(icon_cfg.get("dark_scene_purple_relax_max", 0.08))
+    score_floor = float(icon_cfg.get("dark_scene_score_floor", 0.62))
+    purple_floor = float(icon_cfg.get("dark_scene_purple_floor", 0.14))
+    score_th = max(score_floor, score_th - score_relax_max * darkness)
+    purple_th = max(purple_floor, purple_th - purple_relax_max * darkness)
+    return score_th, purple_th, mean_v
+
+
+def _mask_iou(mask_a: Optional[np.ndarray], mask_b: Optional[np.ndarray]) -> float:
+    if mask_a is None or mask_b is None:
+        return 0.0
+    if mask_a.shape != mask_b.shape:
+        return 0.0
+    a = mask_a > 0
+    b = mask_b > 0
+    union = np.count_nonzero(a | b)
+    if union <= 0:
+        return 0.0
+    inter = np.count_nonzero(a & b)
+    return float(inter) / float(union)
+
+
+def _adaptive_iou_threshold(mean_v: float, icon_cfg: Dict) -> float:
+    base = float(icon_cfg.get("mask_iou_threshold", 0.16))
+    if not bool(icon_cfg.get("enable_dark_scene_adaptive_threshold", True)):
+        return base
+    dark_v = float(icon_cfg.get("dark_scene_v_threshold", 92.0))
+    if mean_v >= dark_v:
+        return base
+    darkness = max(0.0, min(1.0, (dark_v - mean_v) / max(dark_v, 1.0)))
+    relax = float(icon_cfg.get("mask_iou_dark_relax_max", 0.08))
+    floor = float(icon_cfg.get("mask_iou_dark_floor", 0.08))
+    return max(floor, base - relax * darkness)
+
+
+def _bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ax2, ay2 = ax + aw, ay + ah
+    bx2, by2 = bx + bw, by + bh
+    ix1 = max(ax, bx)
+    iy1 = max(ay, by)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0, ix2 - ix1)
+    ih = max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    union = aw * ah + bw * bh - inter
+    if union <= 0:
+        return 0.0
+    return float(inter) / float(union)
+
+
+def _collect_match_candidates(
+    frame_bgr: np.ndarray, template_bgr: np.ndarray, icon_cfg: Dict
+) -> List[Dict]:
+    scales = icon_cfg.get("template_scales", [1.0]) or [1.0]
+    topk_per_scale = int(icon_cfg.get("template_topk_per_scale", 5))
+    max_candidates = int(icon_cfg.get("template_max_candidates", 18))
+    ih, iw = frame_bgr.shape[:2]
+    cands: List[Dict] = []
+    for scale in scales:
+        try:
+            scale = float(scale)
+        except Exception:
+            continue
+        if scale <= 0:
+            continue
+        if abs(scale - 1.0) < 1e-3:
+            scaled = template_bgr
+        else:
+            tw = max(8, int(round(template_bgr.shape[1] * scale)))
+            th = max(8, int(round(template_bgr.shape[0] * scale)))
+            scaled = cv2.resize(template_bgr, (tw, th), interpolation=cv2.INTER_LINEAR)
+        th, tw = scaled.shape[:2]
+        if ih < th or iw < tw:
+            continue
+
+        result = cv2.matchTemplate(frame_bgr, scaled, cv2.TM_CCOEFF_NORMED)
+        if result is None or result.size == 0:
+            continue
+        flat = result.reshape(-1)
+        k = min(max(1, topk_per_scale), flat.size)
+        idxs = np.argpartition(flat, -k)[-k:]
+        idxs = idxs[np.argsort(flat[idxs])[::-1]]
+        rw = result.shape[1]
+        for idx in idxs:
+            y = int(idx // rw)
+            x = int(idx % rw)
+            cands.append(
+                {
+                    "score": float(result[y, x]),
+                    "x": x,
+                    "y": y,
+                    "w": tw,
+                    "h": th,
+                    "template": scaled,
+                }
+            )
+
+    if not cands:
+        return []
+
+    cands.sort(key=lambda z: z["score"], reverse=True)
+    keep: List[Dict] = []
+    iou_nms = float(icon_cfg.get("template_candidate_iou_nms", 0.70))
+    for c in cands:
+        box = (c["x"], c["y"], c["w"], c["h"])
+        conflict = False
+        for k in keep:
+            if _bbox_iou(box, (k["x"], k["y"], k["w"], k["h"])) >= iou_nms:
+                conflict = True
+                break
+        if conflict:
+            continue
+        keep.append(c)
+        if len(keep) >= max(1, max_candidates):
+            break
+    return keep
+
+
+def _detect_purple_icon_from_frame_template(
+    frame_bgr: np.ndarray, icon_cfg: Dict, template_bgr: np.ndarray
+) -> Tuple[bool, float, float, str, Tuple[int, int, int, int]]:
+    if frame_bgr is None or frame_bgr.size == 0:
+        return False, 0.0, 0.0, "icon-empty-frame", (0, 0, 0, 0)
+    if template_bgr is None or template_bgr.size == 0:
+        return False, 0.0, 0.0, "icon-template-invalid", (0, 0, 0, 0)
+
+    match_frame = _boost_lowlight_bgr(frame_bgr, icon_cfg)
+    score_th, purple_th, mean_v = _adaptive_thresholds(match_frame, icon_cfg)
+    iou_th = _adaptive_iou_threshold(mean_v, icon_cfg)
+    bypass_margin = float(icon_cfg.get("mask_iou_bypass_score_margin", 0.08))
+
+    candidates = _collect_match_candidates(match_frame, template_bgr, icon_cfg)
+    if not candidates:
+        return False, 0.0, 0.0, "icon-template-too-large", (0, 0, 0, 0)
+
+    best_any = None
+    best_hit = None
+    for cand in candidates:
+        x, y, tw, th = cand["x"], cand["y"], cand["w"], cand["h"]
+        region = match_frame[y : y + th, x : x + tw]
+        if region.size == 0:
+            continue
+        purple_ratio = _purple_ratio(region, icon_cfg.get("hsv_ranges", []))
+        tmpl_scaled = cand["template"]
+        region_hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        tmpl_hsv = cv2.cvtColor(tmpl_scaled, cv2.COLOR_BGR2HSV)
+        region_mask = _purple_mask_from_hsv(region_hsv, icon_cfg.get("hsv_ranges", []))
+        tmpl_mask = _purple_mask_from_hsv(tmpl_hsv, icon_cfg.get("hsv_ranges", []))
+        iou = _mask_iou(region_mask, tmpl_mask)
+
+        iou_pass = True
+        if bool(icon_cfg.get("enable_mask_iou_gate", True)):
+            iou_pass = (iou >= iou_th) or (cand["score"] >= score_th + bypass_margin)
+        hit = (cand["score"] >= score_th) and (purple_ratio >= purple_th) and iou_pass
+
+        sn = cand["score"] / max(score_th, 1e-6)
+        pn = purple_ratio / max(purple_th, 1e-6)
+        inn = iou / max(iou_th, 1e-6)
+        composite = 0.58 * sn + 0.24 * pn + 0.18 * inn
+        item = {
+            "hit": hit,
+            "score": float(cand["score"]),
+            "purple": float(purple_ratio),
+            "iou": float(iou),
+            "x": int(x),
+            "y": int(y),
+            "w": int(tw),
+            "h": int(th),
+            "composite": float(composite),
+        }
+
+        if best_any is None or item["composite"] > best_any["composite"]:
+            best_any = item
+        if hit and (best_hit is None or item["composite"] > best_hit["composite"]):
+            best_hit = item
+
+    chosen = best_hit if best_hit is not None else best_any
+    if chosen is None:
+        return False, 0.0, 0.0, "icon-no-candidate", (0, 0, 0, 0)
+
+    ok = bool(chosen["hit"])
+    reason = (
+        f"icon(score={chosen['score']:.3f},purple={chosen['purple']:.3f},iou={chosen['iou']:.3f},"
+        f"size={chosen['w']}x{chosen['h']},v={mean_v:.1f},cmp={chosen['composite']:.3f},"
+        f"th={score_th:.3f}/{purple_th:.3f}/{iou_th:.3f})"
+    )
+    return (
+        ok,
+        float(chosen["score"]),
+        float(chosen["purple"]),
+        reason,
+        (int(chosen["x"]), int(chosen["y"]), int(chosen["w"]), int(chosen["h"])),
+    )
+
+
+def _match_template_multiscale(
+    frame_bgr: np.ndarray, template_bgr: np.ndarray, icon_cfg: Dict
+) -> Tuple[float, Tuple[int, int], Tuple[int, int], np.ndarray]:
+    best_score = -1.0
+    best_loc = (0, 0)
+    best_size = (0, 0)
+    best_template = template_bgr
+    scales = icon_cfg.get("template_scales", [1.0]) or [1.0]
+    ih, iw = frame_bgr.shape[:2]
+    for scale in scales:
+        try:
+            scale = float(scale)
+        except Exception:
+            continue
+        if scale <= 0:
+            continue
+        if abs(scale - 1.0) < 1e-3:
+            scaled = template_bgr
+        else:
+            tw = max(8, int(round(template_bgr.shape[1] * scale)))
+            th = max(8, int(round(template_bgr.shape[0] * scale)))
+            scaled = cv2.resize(template_bgr, (tw, th), interpolation=cv2.INTER_LINEAR)
+        th, tw = scaled.shape[:2]
+        if ih < th or iw < tw:
+            continue
+        result = cv2.matchTemplate(frame_bgr, scaled, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        if max_val > best_score:
+            best_score = float(max_val)
+            best_loc = max_loc
+            best_size = (tw, th)
+            best_template = scaled
+    return best_score, best_loc, best_size, best_template
 
 
 def crop_template_to_icon(template_bgr: np.ndarray, icon_cfg: Dict) -> np.ndarray:
@@ -386,50 +734,18 @@ def detect_purple_icon(image_path: Path, icon_cfg: Dict) -> Tuple[bool, float, f
     if tmpl is None:
         return False, 0.0, 0.0, "icon-template-read-failed"
 
-    ih, iw = img.shape[:2]
-    th, tw = tmpl.shape[:2]
-    if ih < th or iw < tw:
-        return False, 0.0, 0.0, "icon-template-too-large"
-
-    result = cv2.matchTemplate(img, tmpl, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(result)
-
-    x, y = max_loc
-    region = img[y:y + th, x:x + tw]
-    purple_ratio = _purple_ratio(region, icon_cfg.get("hsv_ranges", []))
-
-    score_th = float(icon_cfg.get("template_match_threshold", 0.55))
-    purple_th = float(icon_cfg.get("purple_ratio_threshold", 0.12))
-    ok = (max_val >= score_th) and (purple_ratio >= purple_th)
-    reason = f"icon(score={max_val:.3f},purple={purple_ratio:.3f})"
-    return ok, float(max_val), float(purple_ratio), reason
+    ok, score, ratio, reason, _bbox = _detect_purple_icon_from_frame_template(img, icon_cfg, tmpl)
+    return ok, score, ratio, reason
 
 
 def detect_purple_icon_in_frame(frame_bgr: np.ndarray, icon_cfg: Dict, template_bgr: np.ndarray) -> Tuple[bool, float, float, str]:
     if not bool(icon_cfg.get("use_template", True)):
         ok, score, ratio, reason, _ = detect_purple_icon_blob_in_frame(frame_bgr, icon_cfg)
         return ok, score, ratio, reason
-    if frame_bgr is None or frame_bgr.size == 0:
-        return False, 0.0, 0.0, "icon-empty-frame"
-    if template_bgr is None or template_bgr.size == 0:
-        return False, 0.0, 0.0, "icon-template-invalid"
-
-    ih, iw = frame_bgr.shape[:2]
-    th, tw = template_bgr.shape[:2]
-    if ih < th or iw < tw:
-        return False, 0.0, 0.0, "icon-template-too-large"
-
-    result = cv2.matchTemplate(frame_bgr, template_bgr, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(result)
-    x, y = max_loc
-    region = frame_bgr[y:y + th, x:x + tw]
-    purple_ratio = _purple_ratio(region, icon_cfg.get("hsv_ranges", []))
-
-    score_th = float(icon_cfg.get("template_match_threshold", 0.55))
-    purple_th = float(icon_cfg.get("purple_ratio_threshold", 0.12))
-    ok = (max_val >= score_th) and (purple_ratio >= purple_th)
-    reason = f"icon(score={max_val:.3f},purple={purple_ratio:.3f})"
-    return ok, float(max_val), float(purple_ratio), reason
+    ok, score, ratio, reason, _bbox = _detect_purple_icon_from_frame_template(
+        frame_bgr, icon_cfg, template_bgr
+    )
+    return ok, score, ratio, reason
 
 
 def detect_purple_icon_in_frame_with_bbox(
@@ -437,27 +753,7 @@ def detect_purple_icon_in_frame_with_bbox(
 ) -> Tuple[bool, float, float, str, Tuple[int, int, int, int]]:
     if not bool(icon_cfg.get("use_template", True)):
         return detect_purple_icon_blob_in_frame(frame_bgr, icon_cfg)
-    if frame_bgr is None or frame_bgr.size == 0:
-        return False, 0.0, 0.0, "icon-empty-frame", (0, 0, 0, 0)
-    if template_bgr is None or template_bgr.size == 0:
-        return False, 0.0, 0.0, "icon-template-invalid", (0, 0, 0, 0)
-
-    ih, iw = frame_bgr.shape[:2]
-    th, tw = template_bgr.shape[:2]
-    if ih < th or iw < tw:
-        return False, 0.0, 0.0, "icon-template-too-large", (0, 0, 0, 0)
-
-    result = cv2.matchTemplate(frame_bgr, template_bgr, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(result)
-    x, y = max_loc
-    region = frame_bgr[y:y + th, x:x + tw]
-    purple_ratio = _purple_ratio(region, icon_cfg.get("hsv_ranges", []))
-
-    score_th = float(icon_cfg.get("template_match_threshold", 0.55))
-    purple_th = float(icon_cfg.get("purple_ratio_threshold", 0.12))
-    ok = (max_val >= score_th) and (purple_ratio >= purple_th)
-    reason = f"icon(score={max_val:.3f},purple={purple_ratio:.3f})"
-    return ok, float(max_val), float(purple_ratio), reason, (int(x), int(y), int(tw), int(th))
+    return _detect_purple_icon_from_frame_template(frame_bgr, icon_cfg, template_bgr)
 
 
 def detect_purple_icon_blob_in_frame(
